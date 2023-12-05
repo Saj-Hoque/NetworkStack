@@ -3,7 +3,8 @@ import sys
 import random
 from datetime import datetime
 
-PIPE_NAME = "Part-1"
+SERVER_PIPE = "server"
+CLIENT_PIPE = "client"
 CONNECTED = True
 STATUS_CODES_300 = [ '300 Multiple Choices',
                      '301 Moved Permanently',
@@ -18,8 +19,9 @@ STATUS_CODES_300 = [ '300 Multiple Choices',
 
 class Server():
 
-    def __init__(self, pipe_path):
-        self.pipe_path = pipe_path
+    def __init__(self, client_path, server_path):
+        self.client_pipe = client_path
+        self.server_pipe = server_path
 
 
     # Primary Methods:
@@ -28,8 +30,8 @@ class Server():
     def open_connection(self):
 
         # create pipe if it does not already exist
-        if not os.path.exists(self.pipe_path):
-            os.mkfifo(self.pipe_path)
+        if not os.path.exists(self.server_pipe):
+            os.mkfifo(self.server_pipe)
         
         print("Server is running...")
 
@@ -38,14 +40,14 @@ class Server():
 
     def close_connection(self):
         # To ensure the pipe is not open, without the server being open ELSE the client is sending requests to nobody.
-        if os.path.exists(self.pipe_path):
-            os.remove(self.pipe_path)
+        if os.path.exists(self.server_pipe):
+            os.remove(self.server_pipe)
 
         # Exit the program
         sys.exit()
 
     def _receive_requests(self):
-        with open(self.pipe_path, 'r') as request_pipe:
+        with open(self.server_pipe, 'r') as request_pipe:
             while CONNECTED:
                 # While the server connection is stable read any incoming requests from the named pipe
                 request = request_pipe.read()
@@ -62,7 +64,7 @@ class Server():
 
     def _send_response(self, response):
         # Send the response back to the client through the named pipe
-        with open (self.pipe_path, 'w') as response_pipe:
+        with open (self.client_pipe, 'w') as response_pipe:
             response_pipe.write(response)        
 
     def _process_request(self, request):
@@ -137,9 +139,12 @@ class Server():
         response += f"{headers}"        + "\r\n" + "\r\n"
         response += f"{response_body}"            + "\r\n" if response_body else ''
 
+        with open("server_log.txt", "a") as log:
+            log.write(response)
+
         return response 
 
-server = Server(PIPE_NAME)
+server = Server(CLIENT_PIPE, SERVER_PIPE)
 
 try:
     server.open_connection()
