@@ -15,15 +15,75 @@ STATUS_CODES_300 = [ '300 Multiple Choices',
                      # '306 Switch Proxy', - No longer used
                      '307 Temporary Redirect',
                      '308 Permanent Redirect' ]
-                    
+  
+class TCP_Segment():
+    def __init__(self, segment):
+
+        # Source port
+        self.source_port = int(segment[0:16], 2)
+        # Destination port
+        self.dest_port = int(segment[16:32], 2)
+        # Sequence number        
+        self.seq_num = int(segment[32:64], 2)
+        # Acknowledgement number
+        self.ack_num = int(segment[64:96], 2)
+        # Header length
+        self.length = int(segment[96:100], 2) # 32 bit multiples / 4 bytes NOTE: Recorded as Hex
+        # Reserved / Unused
+        self.reserved = int(segment[100:106], 2) # unused, TODO: should probably check for this to be 0, would be incorrect otherwise?
+        # Flags
+        self.URG = int(segment[106:107], 2)
+        self.ACK = int(segment[107:108], 2)
+        self.PSH = int(segment[108:109], 2)
+        self.RST = int(segment[109:110], 2)
+        self.SYN = int(segment[110:111], 2)
+        self.FIN = int(segment[111:112], 2)
+        # Window size
+        self.window_size = int(segment[112:128], 2)
+        # Checksum
+        self.checksum = int(segment[128:144], 2) # TODO: Pretty sure this is in hexadecimal, need to look into this
+        # Urgent pointer
+        if self.URG: self.urgent_pointer = int(segment[144:160], 2)
+        # Options / Padding
+        header_end = self.length * 32 # Header length is measured in 32-bit multiples
+        self.options = segment[160:header_end]
+        # Payload / Data
+        self.data_raw = segment[header_end:]
+        
+
+class TCP_Layer():
+    def __init__(self, client_pipe, server_pipe):
+        self.tcp_send_pipe = client_pipe
+        self.tcp_recieve_pipe = server_pipe
+
+    def establish_handshake(self):
+        # Wait for client to establish TCP connection
+        with open(self.tcp_recieve_pipe, 'r') as connection_request_pipe:
+            tcp_request = connection_request_pipe.read()
+            # process the request
+            self.process_request(tcp_request)
+            # do some things to it (in relation to syn, ack)
+            # return the response
+            with open (self.client_pipe, 'w') as tcp_connect_response_pipe:
+                tcp_connect_response_pipe.write(response)    
+
+    def process_request(self, request_binary):
+        req = '0000000001010000000011000000110000001100000011000000110000001100000011000000110000001100000011001001000000010010000000000000000000000000000000000000000000000000'
+        # NOTE: SEE testing_TCP_segments.py
+
+        # Decode into readable headers
+        request = TCP_Segment(request_binary)
+        # split it up into appropriate headers, into a dictionary?
+
 
 class Server():
 
     def __init__(self, client_path, server_path):
         self.client_pipe = client_path
         self.server_pipe = server_path
+        self.tcp = TCP_Layer(self.client_pipe, self.server_pipe)
 
-
+    
     # Primary Methods:
 
 
@@ -35,6 +95,12 @@ class Server():
         
         print("Server is running...")
 
+
+        #-#-#-#-#-#-
+        #TODO: Establish connection using handshake
+        self.tcp.establish_handshake()
+        #--#-#-#-#-
+
         # Proceed to recieve requests until closed
         self._receive_requests()
 
@@ -43,8 +109,12 @@ class Server():
         if os.path.exists(self.server_pipe):
             os.remove(self.server_pipe)
 
+        #-#-#-#-#-#-
+        #TODO: Close off the connection: Server Side
+        #-#-#-#-#-#-
+
         # Exit the program
-        sys.exit()
+        sys.exit()    
 
     def _receive_requests(self):
         with open(self.server_pipe, 'r') as request_pipe:
