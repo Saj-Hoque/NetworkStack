@@ -1,8 +1,13 @@
 import os
 import sys
 import random
+from math import ceil
 from datetime import datetime
+import time
 
+
+TCP_PORT = 80
+MAX_WINDOW_SIZE = 65535 # Maximum size in Bytes
 SERVER_PIPE = "server"
 CLIENT_PIPE = "client"
 CONNECTED = True
@@ -17,8 +22,45 @@ STATUS_CODES_300 = [ '300 Multiple Choices',
                      '308 Permanent Redirect' ]
   
 class TCP_Segment():
-    def __init__(self, segment):
+    def __init__(self):
+        pass
 
+    def encrypt(self, source_port, dest_port, seq_num, ack_num, URG, ACK, PSH, RST, SYN, FIN, window_size, checksum, urgent_pointer, options, data):
+
+        self.source_port = bin(source_port)[2:].zfill(16)
+        self.dest_port = bin(dest_port)[2:].zfill(16)
+        self.seq_num = bin(seq_num)[2:].zfill(32)
+        self.ack_num = bin(ack_num)[2:].zfill(32)
+        self.reserved = bin(0)[2:].zfill(6)
+        self.URG = bin(URG)[2:].zfill(1)
+        self.ACK = bin(ACK)[2:].zfill(1)
+        self.PSH = bin(PSH)[2:].zfill(1)
+        self.RST = bin(RST)[2:].zfill(1)
+        self.SYN = bin(SYN)[2:].zfill(1)
+        self.FIN = bin(FIN)[2:].zfill(1)
+        self.window_size = bin(window_size)[2:].zfill(16)
+        self.checksum = bin(checksum)[2:].zfill(16)
+        self.urgent_pointer = bin(urgent_pointer)[2:].zfill(16)
+        if options is not None:
+            self.options = bin(options)[2:]
+            self.options.zfill(ceil(len(self.options) / 32) * 32)
+        else:
+            self.options = ''
+        if data is not None:
+            self.data_raw = bin(data)[2:]
+        else:
+            self.data_raw = ''
+
+        self.data_length = len(self.data_raw)
+
+        
+        self.header_length = bin((len(self.source_port + self.dest_port + self.seq_num + self.ack_num + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options) + 4) // 32)[2:].zfill(4)  # 4 bits for the header length itself
+        
+        header = self.source_port + self.dest_port + self.seq_num + self.ack_num + self.header_length + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options
+        self.segment = header + self.data_raw
+
+
+    def decrypt(self, segment):
         # Source port
         self.source_port = int(segment[0:16], 2)
         # Destination port
@@ -28,7 +70,7 @@ class TCP_Segment():
         # Acknowledgement number
         self.ack_num = int(segment[64:96], 2)
         # Header length
-        self.length = int(segment[96:100], 2) # 32 bit multiples / 4 bytes NOTE: Recorded as Hex
+        self.header_length = int(segment[96:100], 2) # 32 bit multiples / 4 bytes NOTE: Recorded as Hex
         # Reserved / Unused
         self.reserved = int(segment[100:106], 2) # unused, TODO: should probably check for this to be 0, would be incorrect otherwise?
         # Flags
@@ -43,37 +85,231 @@ class TCP_Segment():
         # Checksum
         self.checksum = int(segment[128:144], 2) # TODO: Pretty sure this is in hexadecimal, need to look into this
         # Urgent pointer
-        if self.URG: self.urgent_pointer = int(segment[144:160], 2)
+        if self.URG: 
+            self.urgent_pointer = int(segment[144:160], 2)
+        else:
+            self.urgent_pointer = False
         # Options / Padding
-        header_end = self.length * 32 # Header length is measured in 32-bit multiples
+        header_end = self.header_length * 32 # Header length is measured in 32-bit multiples
         self.options = segment[160:header_end]
         # Payload / Data
         self.data_raw = segment[header_end:]
+        self.data_length = len(self.data_raw)
         
 
-class TCP_Layer():
+class Transport_Layer():
     def __init__(self, client_pipe, server_pipe):
         self.tcp_send_pipe = client_pipe
         self.tcp_recieve_pipe = server_pipe
+        self.status = 'CLOSED'
+
+    def set_status(self, new_status):
+        self.status = new_status
 
     def establish_handshake(self):
         # Wait for client to establish TCP connection
         with open(self.tcp_recieve_pipe, 'r') as connection_request_pipe:
-            tcp_request = connection_request_pipe.read()
-            # process the request
-            self.process_request(tcp_request)
-            # do some things to it (in relation to syn, ack)
-            # return the response
-            with open (self.client_pipe, 'w') as tcp_connect_response_pipe:
-                tcp_connect_response_pipe.write(response)    
+            # set TCP status to 'LISTEN' through a passive open
+            self.set_status('LISTEN')
+            self.seq_counter = 0
+            self.ack_counter = 0
+
+            while self.status != 'ESTABLISHED':
+
+                if self.status == 'LISTEN':
+                    tcp_request = connection_request_pipe.read()
+
+                    if not tcp_request:
+                        continue
+
+                    # process the request
+                    request = self.process_request(tcp_request)
+                    
+                    # ignore request if it cannot be decrypted
+                    if request is False:
+                        continue
+
+                    # ignore request if its acknowledgement number does not match the servers sequence number
+                    if request.ack_num != self.seq_counter:
+                        continue
+
+                    self.latest_request = request
+                    
+                    if request.SYN and not( request.ACK or request.PSH or request.RST or request.URG or request.FIN):
+                        # acknowledge 1 phantom byte from SYN packet
+
+                        self.update_ack_counter(1)
+                        response = self.create_response(request, SYN=True, ACK=True, data=None)    
+                        
+                        #self.send_response(response.segment)
+                        
+                        # Have sent up to 1 phantom byte due to SYN ACK packet
+                        self.update_seq_counter(1)
+
+                        self.status = 'SYN_RCVD'
+                    else:
+                        continue
+                
+                if self.status == 'SYN_RCVD':
+                    tcp_request = connection_request_pipe.read()
+                    
+                    if not tcp_request:
+                        continue
+
+                    request = self.process_request(tcp_request)
+
+                    # ignore request if it cannot be decrypted
+                    if request is False:
+                        continue
+
+                    # ignore request if its acknowledgement number does not match the servers sequence number
+                    if request.ack_num != self.seq_counter:
+                        continue
+
+                    self.latest_request = request
+
+                    if request.ACK and not( request.SYN or request.PSH or request.RST or request.URG or request.FIN):
+                        self.status = 'ESTABLISHED'
+                    else:
+                        continue
+
+
+    def update_seq_counter(self, payload_bytes):
+        self.seq_counter += payload_bytes
+
+    def update_ack_counter(self, payload_bytes):
+        self.ack_counter += payload_bytes
+
 
     def process_request(self, request_binary):
-        req = '0000000001010000000011000000110000001100000011000000110000001100000011000000110000001100000011001001000000010010000000000000000000000000000000000000000000000000'
+        req = '1111001100101010000000000101000000000000000000000000000000000000000000000000000000000000000000000101000000000010111111111111111100000000000000000000000000000000'
+        reb = '1111001100101010000000000101000000000000000000000000000000000001000000000000000000000000000000010101000000010000111111111111111100000000000000000000000000000000'
+        rel = '1111001100101010000000000101000000000000000000000000000000000001000000000000000000000000000000100101000000010000111111111111111100000000000000000000000000000000'
+        rep = '1111001100101010000000000101000000000000000000000000000000000001000000000000000000000000000000100101000000000001111111111111111100000000000000000000000000000000'
         # NOTE: SEE testing_TCP_segments.py
 
         # Decode into readable headers
-        request = TCP_Segment(request_binary)
-        # split it up into appropriate headers, into a dictionary?
+        try:
+            request = TCP_Segment()
+            request.decrypt(request_binary)
+        except:
+            request = False
+
+        return request
+    
+    def create_response(self, request, SYN=False, ACK=False, PSH=False, FIN=False, data=None):
+
+        try:
+            response = TCP_Segment()
+            response.encrypt(source_port = TCP_PORT, 
+                            dest_port = request.source_port,
+                            seq_num = self.seq_counter,
+                            ack_num = self.ack_counter,
+                            URG = False, #preset
+                            ACK = ACK,
+                            PSH = PSH,
+                            RST = False, #preset
+                            SYN = SYN,
+                            FIN = FIN,
+                            window_size = MAX_WINDOW_SIZE,
+                            checksum = 0, # TODO: Need to do this
+                            urgent_pointer = 0, #preset
+                            options = None, # TODO: Decide whether im doing this or not
+                            data = data)
+            return response
+        except:
+            print("Something going wrong when encyrpting response") # TODO: Get rid of this
+
+    def send_response(self, response):
+        
+        with open (self.tcp_send_pipe, 'w') as tcp_connect_response_pipe:
+            tcp_connect_response_pipe.write(response)
+
+
+    def terminate_connection(self):
+    
+        # Active CLOSE
+        if self.status == 'SYN_RCVD' or self.status == 'ESTABLISHED':
+
+            response = self.create_response(self.latest_request, FIN=True, data=None)
+            #self.send_response(response.segment)
+            # Have sent up to 1 phantom byte due to FIN packet
+            self.update_seq_counter(1)
+
+            self.status = 'FIN_WAIT_1'
+
+        
+        with open(self.tcp_recieve_pipe, 'r') as connection_request_pipe:
+
+            while self.status != 'CLOSED':
+
+                if self.status == 'FIN_WAIT_1':
+
+                    tcp_request = connection_request_pipe.read()
+
+                    if not tcp_request:
+                        continue
+
+                    # process the request
+                    request = self.process_request(tcp_request)
+                    
+                    # ignore request if it cannot be decrypted
+                    if request is False:
+                        continue
+
+                    # ignore request if its acknowledgement number does not match the servers sequence number
+                    if request.ack_num != self.seq_counter:
+                        continue
+
+                    self.latest_request = request
+                    
+                    if request.ACK and not( request.SYN or request.PSH or request.RST or request.URG or request.FIN):
+                        self.status = 'FIN_WAIT_2'
+                    else:
+                        continue
+
+                if self.status == 'FIN_WAIT_2':
+
+                    tcp_request = connection_request_pipe.read()
+
+                    if not tcp_request:
+                        continue
+
+                    # process the request
+                    request = self.process_request(tcp_request)
+                    
+                    # ignore request if it cannot be decrypted
+                    if request is False:
+                        continue
+
+                    # ignore request if its acknowledgement number does not match the servers sequence number
+                    if request.ack_num != self.seq_counter:
+                        continue
+
+                    self.latest_request = request
+                    
+                    if request.FIN and not( request.SYN or request.PSH or request.RST or request.URG or request.ACK):
+                        # acknowledge 1 phantom byte from FIN packet
+                        self.update_ack_counter(1)
+                        response = self.create_response(request, ACK=True, data=None)    
+                        
+                        #self.send_response(response.segment)
+                        
+                        self.status = 'TIME_WAIT'
+                    else:
+                        continue
+                
+                if self.status == 'TIME_WAIT':
+
+                    # Not bothering with it right now, but essentially this will wait 2 * 2 minutes as a reasonable amount of time to allow the client to recieve the ack
+                    # then it will terminate the connection
+                    # time.sleep(120*2)
+                    # Don't think we will do this considering we are not programming retransmission
+                    
+                    self.status = 'CLOSED'
+
+
+
 
 
 class Server():
@@ -81,7 +317,7 @@ class Server():
     def __init__(self, client_path, server_path):
         self.client_pipe = client_path
         self.server_pipe = server_path
-        self.tcp = TCP_Layer(self.client_pipe, self.server_pipe)
+        self.tcp = Transport_Layer(self.client_pipe, self.server_pipe)
 
     
     # Primary Methods:
@@ -97,21 +333,26 @@ class Server():
 
 
         #-#-#-#-#-#-
-        #TODO: Establish connection using handshake
-        self.tcp.establish_handshake()
+        # Establish connection using handshake using passive OPEN
+        if self.tcp.status == 'CLOSED':
+            self.tcp.establish_handshake()
+        
+        if self.tcp.status == 'ESTABLISHED':
+            print("Connection successfully established")
         #--#-#-#-#-
 
         # Proceed to recieve requests until closed
         self._receive_requests()
 
     def close_connection(self):
-        # To ensure the pipe is not open, without the server being open ELSE the client is sending requests to nobody.
-        if os.path.exists(self.server_pipe):
-            os.remove(self.server_pipe)
+        
+        if self.tcp.status == 'ESTABLISHED' or self.tcp.status == "SYN_RCVD":
+            self.tcp.terminate_connection()
 
-        #-#-#-#-#-#-
-        #TODO: Close off the connection: Server Side
-        #-#-#-#-#-#-
+        if self.tcp.status == 'CLOSED':
+            # To ensure the pipe is not open, without the server being open ELSE the client is sending requests to nobody.
+            if os.path.exists(self.server_pipe):
+                os.remove(self.server_pipe)
 
         # Exit the program
         sys.exit()    
