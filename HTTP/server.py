@@ -17,105 +17,91 @@ STATUS_CODES_300 = [ '300 Multiple Choices',
                      '308 Permanent Redirect' ]
                     
 
-class Server():
+class Application_Layer():
+    def __init__(self, client_pipe, server_pipe):
+        self.http_send_pipe = client_pipe
+        self.http_recieve_pipe = server_pipe
 
-    def __init__(self, client_path, server_path):
-        self.client_pipe = client_path
-        self.server_pipe = server_path
+    def receive_request(self, request_pipe):
+        request = None
 
-
-    # Primary Methods:
-
-
-    def open_connection(self):
-
-        # create pipe if it does not already exist
-        if not os.path.exists(self.server_pipe):
-            os.mkfifo(self.server_pipe)
+        # While the server connection is stable read any incoming requests from the named pipe
+        while not request:
+            request = request_pipe.read()
         
-        print("Server is running...")
+        return request
 
-        # Proceed to recieve requests until closed
-        self._receive_requests()
-
-    def close_connection(self):
-        # To ensure the pipe is not open, without the server being open ELSE the client is sending requests to nobody.
-        if os.path.exists(self.server_pipe):
-            os.remove(self.server_pipe)
-
-        # Exit the program
-        sys.exit()
-
-    def _receive_requests(self):
-        with open(self.server_pipe, 'r') as request_pipe:
-            while CONNECTED:
-                # While the server connection is stable read any incoming requests from the named pipe
-                request = request_pipe.read()
-                # TODO: Need to change this so it checks each line because the headers may be important - need to discuss
-                # Looking into it, it seems only Host is really relevant (also mandatory i think) for HTTP GET and HEAD requests
-                # so maybe there is an if statement checking whether the host is "example.com" else it gives a 400 / 404 saying it cant recognize host
-
-                if not request:
-                    continue
-                # If there are no incoming requests, restart the loop
-
-                # Otherwise understand what the request is and deal with it accordingly
-                self._process_request(request)
-
-    def _send_response(self, response):
-        # Send the response back to the client through the named pipe
-        with open (self.client_pipe, 'w') as response_pipe:
-            response_pipe.write(response)        
-
-    def _process_request(self, request):
+    def process_request(self, http_request):
         # Check what the request is
-        if request.startswith("GET /"):      # can easily do this with re, might be better? may be more relevant when we are checking all the lines of the request
-            response = self._do_GET()
-        elif request.startswith("HEAD /"):
-            response = self._do_HEAD()
+        if http_request.startswith("GET /"): 
+            http_request_type = 'GET'
+        elif http_request.startswith("HEAD /"):
+            http_request_type = 'HEAD'
         else:
-            response = self._do_INVALID()
+            http_request_type = 'INVALID'
 
-        self._send_response(response)
+        return http_request_type
+
+    def create_response(self, http_request_type):
+        if http_request_type == 'GET':
+            http_response = self.do_GET()
+        elif http_request_type == 'HEAD':
+            http_response = self.do_HEAD()
+        else:
+            http_response = self.do_INVALID()
+
+        return http_response
+
+    def send_response(self, http_response):
+        # Send the response back to the client through the named pipe
+        with open (self.http_send_pipe, 'w') as response_pipe:
+            response_pipe.write(http_response)   
 
 
-    # HTTP Methods
 
-
-    def _do_GET(self):
-        status_code = self._generate_status_code()
-        response_body = self._generate_body(status_code)
-        headers = self._generate_headers()
-
-        return self._generate_response(status_code, headers, response_body)
-
-    def _do_HEAD(self):
-        status_code = self._generate_status_code()
-        headers = self._generate_headers()
-
-        return self._generate_response(status_code, headers)
-
-    def _do_INVALID(self):
-        # If the request given is not valid, so in this case not HEAD or GET
-        status_code = self._generate_status_code(invalid=True)
-        response_body = self._generate_body(status_code, invalid=True)
-        headers = self._generate_headers(body=response_body, invalid=True)
-
-        return self._generate_response(status_code, headers, response_body)
-
-    # TODO: These _do_* methods can be generalised
 
 
     # Helper Methods
 
+    def do_GET(self):
+        status_code = self.generate_status_code()
+        response_body = self.generate_body(status_code)
+        headers = self.generate_headers()
 
-    def _generate_status_code(self, invalid=False):
+        return self.generate_response(status_code, headers, response_body)
+
+    def do_HEAD(self):
+        status_code = self.generate_status_code()
+        headers = self.generate_headers()
+
+        return self.generate_response(status_code, headers)
+
+    def do_INVALID(self):
+        # If the request given is not valid, so in this case not HEAD or GET
+        status_code = self.generate_status_code(invalid=True)
+        response_body = self.generate_body(status_code, invalid=True)
+        headers = self.generate_headers(body=response_body, invalid=True)
+
+        return self.generate_response(status_code, headers, response_body)
+
+    def generate_response(self, status_code='', headers='' , response_body=''):
+        response = ""
+        response += f"HTTP/1.1 {status_code}" + "\r\n"
+        response += f"{headers}"        + "\r\n" + "\r\n"
+        response += f"{response_body}"            + "\r\n" if response_body else ''
+
+        with open("server_http_log.txt", "a") as log:
+            log.write(response)
+
+        return response 
+
+    def generate_status_code(self, invalid=False):
         if invalid:
             return '400 Bad Request'
         else:
             return random.choice(STATUS_CODES_300)
 
-    def _generate_headers(self, body='', invalid=False):
+    def generate_headers(self, body='', invalid=False):
         date = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
         headers=''
         if invalid:
@@ -127,36 +113,78 @@ class Server():
         headers += f"Date: {date}"
 
         return headers
-    def _generate_body(self, status_code, invalid=False):
+    def generate_body(self, status_code, invalid=False):
         if invalid:
             return 'Cannot recognize request'
         elif status_code in STATUS_CODES_300:
             return ''                           # The HTTP standard specifies that 3xx status codes should not have response bodies
 
-    def _generate_response(self, status_code='', headers='' , response_body=''):
-        response = ""
-        response += f"HTTP/1.1 {status_code}" + "\r\n"
-        response += f"{headers}"        + "\r\n" + "\r\n"
-        response += f"{response_body}"            + "\r\n" if response_body else ''
 
-        with open("server_log.txt", "a") as log:
-            log.write(response)
 
-        return response 
+
+
+#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#
+
+
+
+
+
+class Server():
+
+    def __init__(self, client_path, server_path):
+        self.client_pipe = client_path
+        self.server_pipe = server_path
+        self.http = Application_Layer(self.client_pipe, self.server_pipe)
+
+    
+    # Primary Methods:
+
+
+    def open_connection(self):
+
+        # create pipe if it does not already exist
+        if not os.path.exists(self.server_pipe):
+            os.mkfifo(self.server_pipe)
+        
+        print("Server is running...")
+
+    def close_connection(self):
+        
+        print("\nClosing the server.")
+        # To ensure the pipe is not open, without the server being open ELSE the client is sending requests to nobody.
+        if os.path.exists(self.server_pipe):
+            os.remove(self.server_pipe)
+
+        # Exit the program
+        sys.exit()    
+
+
+    def run(self):
+        with open(self.server_pipe, 'r') as request_pipe:
+            while CONNECTED:
+
+                request = self.http.receive_request(request_pipe)
+                request_type = self.http.process_request(request)
+                response = self.http.create_response(request_type)
+
+                self.http.send_response(response)
+
+
+
+
+
+#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#
+
+
+
+
 
 server = Server(CLIENT_PIPE, SERVER_PIPE)
 
 try:
     server.open_connection()
+    server.run()
 except KeyboardInterrupt:
-    print("\nClosing the server.")
+    pass
 finally:
     server.close_connection()
-
-# SAME COMMENT IN server.start function
-# maybe could put something like if something hasnt been sent to the pipe in however long it could server.close()? 
-
-
-# TODO: Maybe a little more error handling
-# TODO: 404 / 400 for host not found, I think host is realistically the only header that is relevant from client
-# TODO: How signicficant is the bit after GET /, should the directory specified be taken into account?
