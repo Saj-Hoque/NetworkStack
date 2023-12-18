@@ -5,12 +5,8 @@ from math import ceil
 from datetime import datetime
 import time
 
-
-TCP_PORT = 80
-MAX_WINDOW_SIZE = 65535 # Maximum size in Bytes
 SERVER_PIPE = "server"
 CLIENT_PIPE = "client"
-CONNECTED = True
 STATUS_CODES_300 = [ '300 Multiple Choices',
                      '301 Moved Permanently',
                      '302 Found',
@@ -21,6 +17,7 @@ STATUS_CODES_300 = [ '300 Multiple Choices',
                      '307 Temporary Redirect',
                      '308 Permanent Redirect' ]
 
+PHANTOM_BYTE = 1 
 
 
 
@@ -73,6 +70,9 @@ class Application_Layer():
         with open (self.http_send_pipe, 'w') as response_pipe:
             response_pipe.write(http_response)   
 
+        with open("server_http_log.txt", "a") as log:
+            log.write(http_response)
+
 
 
 
@@ -105,9 +105,6 @@ class Application_Layer():
         response += f"HTTP/1.1 {status_code}" + "\r\n"
         response += f"{headers}"        + "\r\n" + "\r\n"
         response += f"{response_body}"            + "\r\n" if response_body else ''
-
-        with open("server_http_log.txt", "a") as log:
-            log.write(response)
 
         return response 
 
@@ -152,6 +149,9 @@ class Transport_Layer():
         self.tcp_send_pipe = client_pipe
         self.tcp_recieve_pipe = server_pipe
 
+        self.window_size = 65535 # Set to maximum size in Bytes 
+        self.tcp_port = 80 # Default TCP server port
+
     def receive_request(self, connection_request_pipe):
         
         tcp_request = None
@@ -173,23 +173,23 @@ class Transport_Layer():
 
         return request
     
-    def create_response(self, SYN=False, ACK=False, PSH=False, FIN=False, data=None):
+    def create_response(self, SYN=False, ACK=False, PSH=False, FIN=False, URG=False, RST=False, urgent_pointer=False ,options=None, data=None):
 
         tcp_response = TCP_Segment()
-        tcp_response.encrypt( source_port    = TCP_PORT, 
+        tcp_response.encrypt( source_port    = self.tcp_port, 
                               dest_port      = self.client_port,
                               seq_num        = self.seq_counter,
                               ack_num        = self.ack_counter,
-                              URG            = False, #preset
+                              URG            = URG, 
                               ACK            = ACK,
                               PSH            = PSH,
-                              RST            = False, #preset
+                              RST            = RST,
                               SYN            = SYN,
                               FIN            = FIN,
-                              window_size    = MAX_WINDOW_SIZE,
+                              window_size    = self.window_size,
                               checksum       = 0, # TODO: Need to do this
-                              urgent_pointer = 0, #preset
-                              options        = None, # TODO: Decide whether im doing this or not
+                              urgent_pointer = urgent_pointer,
+                              options        = options, # TODO: Decide whether im doing this or not
                               data           = data )
         
         return tcp_response
@@ -243,7 +243,7 @@ class Transport_Layer():
                     ############################################################
 
                     # ignore request if it does not pass verification requirements
-                    if self.verification is False:
+                    if self.verification(decrypted_request) is False:
                         continue
                     
                     # expecting a SYN flag in `LISTEN`
@@ -251,15 +251,15 @@ class Transport_Layer():
                     if decrypted_request.SYN and not( decrypted_request.ACK or decrypted_request.PSH or decrypted_request.RST or decrypted_request.URG or decrypted_request.FIN):
                         # acknowledge 1 phantom byte from SYN packet
                         # increment acknowledment_number for server
-                        self.update_ack_counter(1)
+                        self.update_ack_counter(PHANTOM_BYTE)
                         
                         # respond with a SYN ACK packet
-                        response = self.create_response(SYN=True, ACK=True, data=None)    
+                        response = self.create_response(SYN=True, ACK=True)    
                         #self.send_response(response.segment)
                         
                         # SYN ACK packet acts as sending 1 phantom byte
                         # increment sequence_number for server
-                        self.update_seq_counter(1)
+                        self.update_seq_counter(PHANTOM_BYTE)
 
                         self.TCB.update_state('SYN_RCVD')
                     else:
@@ -274,7 +274,7 @@ class Transport_Layer():
                     decrypted_request = self.process_request(tcp_request)
 
                     # ignore request if it does not pass verification requirements
-                    if self.verification is False:
+                    if self.verification(decrypted_request) is False:
                         continue
 
                     # expecting an ACK flag in `SYN_RCVD`
@@ -302,12 +302,12 @@ class Transport_Layer():
             
             # initiate termination of tcp connection
             # send a FIN packet
-            response = self.create_response(FIN=True, data=None)
+            response = self.create_response(FIN=True)
             #self.send_response(response.segment)
 
             # FIN packet acts as sending 1 phantom byte
             # increment sequence_number for server
-            self.update_seq_counter(1)
+            self.update_seq_counter(PHANTOM_BYTE)
 
             self.TCB.update_state('FIN_WAIT_1')
 
@@ -325,7 +325,7 @@ class Transport_Layer():
                     decrypted_request = self.process_request(tcp_request)
                     
                     # ignore request if it does not pass verification requirements
-                    if self.verification is False:
+                    if self.verification(decrypted_request) is False:
                         continue
                     
                     # expecting an ACK flag in `FIN_WAIT_1`
@@ -345,7 +345,7 @@ class Transport_Layer():
                     decrypted_request = self.process_request(tcp_request)
                     
                     # ignore request if it does not pass verification requirements
-                    if self.verification is False:
+                    if self.verification(decrypted_request) is False:
                         continue
                     
                     # expecting a FIN flag in `FIN_WAIT_2`
@@ -353,10 +353,10 @@ class Transport_Layer():
                     if decrypted_request.FIN and not( decrypted_request.SYN or decrypted_request.PSH or decrypted_request.RST or decrypted_request.URG or decrypted_request.ACK):
                         # acknowledge 1 phantom byte from FIN packet
                         # increment acknowledment_number for server
-                        self.update_ack_counter(1)
+                        self.update_ack_counter(PHANTOM_BYTE)
 
                         # respond with an ACK packet
-                        response = self.create_response(ACK=True, data=None)    
+                        response = self.create_response(ACK=True)    
                         #self.send_response(response.segment)
                         
                         self.TCB.update_state('TIME_WAIT')
@@ -422,8 +422,8 @@ class TCB():
     def __init__(self):
         self.state = 'CLOSED'
   
-    def update_state(self, updated_state):
-        self.state = updated_state
+    def update_state(self, new_state):
+        self.state = new_state
 
 class TCP_Segment():
     def __init__(self):
@@ -456,10 +456,8 @@ class TCP_Segment():
             self.data_raw = ''
 
         self.data_length = len(self.data_raw)
-
-        
-        self.header_length = bin((len(self.source_port + self.dest_port + self.seq_num + self.ack_num + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options) + 4) // 32)[2:].zfill(4)  # 4 bits for the header length itself
-        
+    
+        self.header_length = bin((len(self.source_port + self.dest_port + self.seq_num + self.ack_num + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options) + 4) // 32)[2:].zfill(4)  # 4 bits for the header length itself    
         header = self.source_port + self.dest_port + self.seq_num + self.ack_num + self.header_length + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options
         self.segment = header + self.data_raw
 
@@ -515,6 +513,7 @@ class Server():
     def __init__(self, client_path, server_path):
         self.client_pipe = client_path
         self.server_pipe = server_path
+        self.connected = False
         self.http = Application_Layer(self.client_pipe, self.server_pipe)
         self.tcp = Transport_Layer(self.client_pipe, self.server_pipe)
 
@@ -535,6 +534,7 @@ class Server():
 
         if self.tcp.TCB.state == 'ESTABLISHED':
             print("Connection successfully established")
+            self.connected = True
         else:
             print("Connection failed")
             self.close_connection()
@@ -544,6 +544,7 @@ class Server():
         
         if self.tcp.TCB.state == 'ESTABLISHED' or self.tcp.TCB.state == "SYN_RCVD":
             self.tcp.terminate_connection()
+            self.connected = False
 
         print("\nClosing the server.")
         # To ensure the pipe is not open, without the server being open ELSE the client is sending requests to nobody.
@@ -556,12 +557,11 @@ class Server():
 
     def run(self):
         with open(self.server_pipe, 'r') as request_pipe:
-            while CONNECTED:
+            while self.connected:
 
                 request = self.http.receive_request(request_pipe)
                 request_type = self.http.process_request(request)
                 response = self.http.create_response(request_type)
-
                 self.http.send_response(response)
 
 

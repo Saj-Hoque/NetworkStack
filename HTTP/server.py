@@ -5,7 +5,6 @@ from datetime import datetime
 
 SERVER_PIPE = "server"
 CLIENT_PIPE = "client"
-CONNECTED = True
 STATUS_CODES_300 = [ '300 Multiple Choices',
                      '301 Moved Permanently',
                      '302 Found',
@@ -57,6 +56,9 @@ class Application_Layer():
         with open (self.http_send_pipe, 'w') as response_pipe:
             response_pipe.write(http_response)   
 
+        with open("server_http_log.txt", "a") as log:
+            log.write(http_response)
+
 
 
 
@@ -89,9 +91,6 @@ class Application_Layer():
         response += f"HTTP/1.1 {status_code}" + "\r\n"
         response += f"{headers}"        + "\r\n" + "\r\n"
         response += f"{response_body}"            + "\r\n" if response_body else ''
-
-        with open("server_http_log.txt", "a") as log:
-            log.write(response)
 
         return response 
 
@@ -134,6 +133,7 @@ class Server():
     def __init__(self, client_path, server_path):
         self.client_pipe = client_path
         self.server_pipe = server_path
+        self.connected = False
         self.http = Application_Layer(self.client_pipe, self.server_pipe)
 
     
@@ -145,12 +145,17 @@ class Server():
         # create pipe if it does not already exist
         if not os.path.exists(self.server_pipe):
             os.mkfifo(self.server_pipe)
+
+        self.connected = True
         
         print("Server is running...")
 
     def close_connection(self):
         
         print("\nClosing the server.")
+        
+        self.connected = False
+
         # To ensure the pipe is not open, without the server being open ELSE the client is sending requests to nobody.
         if os.path.exists(self.server_pipe):
             os.remove(self.server_pipe)
@@ -161,12 +166,11 @@ class Server():
 
     def run(self):
         with open(self.server_pipe, 'r') as request_pipe:
-            while CONNECTED:
+            while self.connected:
 
                 request = self.http.receive_request(request_pipe)
                 request_type = self.http.process_request(request)
                 response = self.http.create_response(request_type)
-
                 self.http.send_response(response)
 
 
