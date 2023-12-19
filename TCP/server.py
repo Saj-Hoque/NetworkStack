@@ -180,7 +180,7 @@ class Transport_Layer():
         while not tcp_request:
             tcp_request = connection_request_pipe.read()
         
-        return tcp_request
+        return tcp_request.rstrip()
 
     def process_request(self, request_binary):
         # Decode binary into readable header and data values
@@ -212,7 +212,9 @@ class Transport_Layer():
                               options        = options, # TODO: Decide whether im doing this or not
                               data           = data )
         
+        # Perform checksum calculation
         self.update_checksum(tcp_response)
+        # Update TCP segment to include updated checksum
         tcp_response.update_encryption()
         
         return tcp_response
@@ -279,7 +281,6 @@ class Transport_Layer():
                         # respond with a SYN ACK packet
                         response = self.create_response(SYN=True, ACK=True)    
                         #self.send_response(response.segment)
-                        
                         # SYN ACK packet acts as sending 1 phantom byte
                         # increment sequence_number for server
                         self.update_seq_counter(PHANTOM_BYTE)
@@ -289,7 +290,6 @@ class Transport_Layer():
                         continue
                 
                 if self.TCB.state == 'SYN_RCVD':
-
                     # recieve tcp request as binary
                     tcp_request = self.receive_request(connection_request_pipe)
 
@@ -297,7 +297,7 @@ class Transport_Layer():
                     decrypted_request = self.process_request(tcp_request)
 
                     # ignore request if it does not pass verification requirements
-                    if self.verification(decrypted_request) is False:
+                    if self.verification(tcp_request, decrypted_request) is False:
                         continue
 
                     # expecting an ACK flag in `SYN_RCVD`
@@ -348,7 +348,7 @@ class Transport_Layer():
                     decrypted_request = self.process_request(tcp_request)
                     
                     # ignore request if it does not pass verification requirements
-                    if self.verification(decrypted_request) is False:
+                    if self.verification(tcp_request, decrypted_request) is False:
                         continue
                     
                     # expecting an ACK flag in `FIN_WAIT_1`
@@ -368,7 +368,7 @@ class Transport_Layer():
                     decrypted_request = self.process_request(tcp_request)
                     
                     # ignore request if it does not pass verification requirements
-                    if self.verification(decrypted_request) is False:
+                    if self.verification(tcp_request, decrypted_request) is False:
                         continue
                     
                     # expecting a FIN flag in `FIN_WAIT_2`
@@ -419,25 +419,28 @@ class Transport_Layer():
 
         tcp_pseudo_header = Pseudo_Header(SERVER_IP, CLIENT_IP, TCP_PROTOCOL, tcp_response.length)
         
-        checksum_hex = self.calculate_checksum(tcp_pseudo_header.binary(), tcp_response)
-        print(checksum_hex)
-
-        self.checksum = bin(int(checksum_hex, 16))[2:].zfill(16)    # Convert from hex to binary
+        checksum_hex = self.calculate_checksum(tcp_pseudo_header.binary(), tcp_response.segment, complement=True)
+        tcp_response.checksum = bin(int(checksum_hex, 16))[2:].zfill(16)    # Convert from hex to binary AND set this checksum in the response TCP header
         
         del tcp_pseudo_header
 
 
-    def calculate_checksum(self, pseudo_header_binary, request_binary):
-        size = 16
-        # Adding the pseudo header and the tcp_request, 16 bits at a time
-        binary = pseudo_header_binary + request_binary 
+    def calculate_checksum(self, pseudo_header_binary, tcp_segment_binary, complement=False):
         
+        # Size of checksum in bits - also values need to be added 2 bytes at a time
+        size = 16
+        
+        # Adding the pseudo header and the tcp_request, 16 bits at a time
         dec_addition = 0
-        for bit_no in range(0, len(binary), size):
-            dec_addition += int(binary[bit_no:bit_no+size], 2)
+        for bit_no in range(0, len(pseudo_header_binary), size):
+            dec_addition += int(pseudo_header_binary[bit_no:bit_no+size], 2)
+        for bit_no in range(0, len(tcp_segment_binary), size):
+            if bit_no != 128: # accumulate all data in the header (excluding checksum field) and payload (data)
+                dec_addition += int(tcp_segment_binary[bit_no:bit_no+size], 2)
         added_binary = bin(dec_addition)[2:]
 
-        dec_addition = 0
+        # Add any carries back in to achieve a final 16 bit checksum
+        dec_addition = 0    
         while len(added_binary) > size:
             for bit_no in range(len(added_binary), 0, -size):
                 if bit_no < size:
@@ -447,7 +450,14 @@ class Transport_Layer():
             added_binary = bin(dec_addition)[2:].zfill(size)
             
         complemented_binary = bin(~dec_addition + (1 << size))[2:].zfill(size)
-        return hex(int(complemented_binary, 2))[2:].zfill(4)
+
+
+        # If creating a checksum, return its one's complement for the TCP header.
+        # else return the verifying checksum, which should be the inverse of the TCP header checksum
+        if complement:
+            return hex(int(complemented_binary, 2))[2:].zfill(4)
+        else:
+            return hex(int(added_binary, 2))[2:].zfill(4)
 
     def verification(self, request_binary, decrypted_request):
 
@@ -468,15 +478,13 @@ class Transport_Layer():
 
         # ignore request if calculated checksum does not match with the checksum from the client's request
 
-        tcp_pseudo_header = Pseudo_Header(SERVER_IP, CLIENT_IP, TCP_PROTOCOL, decrypted_request.length)
+        tcp_pseudo_header = Pseudo_Header(CLIENT_IP, SERVER_IP, TCP_PROTOCOL, decrypted_request.length)
         
         calculated_checksum = self.calculate_checksum(tcp_pseudo_header.binary(), request_binary)
-
-        print(calculated_checksum)
         
         del tcp_pseudo_header
 
-        if calculated_checksum != decrypted_request.checksum:
+        if hex(int(calculated_checksum, 16) + int(decrypted_request.checksum, 16))[2:] != 'ffff':
             return False
 
 
