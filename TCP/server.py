@@ -5,6 +5,9 @@ from math import ceil
 from datetime import datetime
 import time
 
+
+SERVER_IP = '192.168.1.1'
+CLIENT_IP = '192.168.1.2'
 SERVER_PIPE = "server"
 CLIENT_PIPE = "client"
 STATUS_CODES_300 = [ '300 Multiple Choices',
@@ -18,6 +21,23 @@ STATUS_CODES_300 = [ '300 Multiple Choices',
                      '308 Permanent Redirect' ]
 
 PHANTOM_BYTE = 1 
+TCP_PROTOCOL = 6
+
+
+#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#
+# Helper Methods
+
+
+
+
+
+def ip_to_binary(ip):
+    binary = ''
+    for part in ip.split('.'):
+        binary += bin(int(part))[2:].zfill(8)
+
+    return binary
+
 
 
 
@@ -187,10 +207,13 @@ class Transport_Layer():
                               SYN            = SYN,
                               FIN            = FIN,
                               window_size    = self.window_size,
-                              checksum       = 0, # TODO: Need to do this
+                              checksum       = 0, # Setting the checksum field to zero for the checksum calculation later
                               urgent_pointer = urgent_pointer,
                               options        = options, # TODO: Decide whether im doing this or not
                               data           = data )
+        
+        self.update_checksum(tcp_response)
+        tcp_response.update_encryption()
         
         return tcp_response
         
@@ -243,7 +266,7 @@ class Transport_Layer():
                     ############################################################
 
                     # ignore request if it does not pass verification requirements
-                    if self.verification(decrypted_request) is False:
+                    if self.verification(tcp_request, decrypted_request) is False:
                         continue
                     
                     # expecting a SYN flag in `LISTEN`
@@ -392,7 +415,41 @@ class Transport_Layer():
     def update_ack_counter(self, payload_bytes):
         self.ack_counter += payload_bytes
 
-    def verification(self, decrypted_request):
+    def update_checksum(self, tcp_response):
+
+        tcp_pseudo_header = Pseudo_Header(SERVER_IP, CLIENT_IP, TCP_PROTOCOL, tcp_response.length)
+        
+        checksum_hex = self.calculate_checksum(tcp_pseudo_header.binary(), tcp_response)
+        print(checksum_hex)
+
+        self.checksum = bin(int(checksum_hex, 16))[2:].zfill(16)    # Convert from hex to binary
+        
+        del tcp_pseudo_header
+
+
+    def calculate_checksum(self, pseudo_header_binary, request_binary):
+        size = 16
+        # Adding the pseudo header and the tcp_request, 16 bits at a time
+        binary = pseudo_header_binary + request_binary 
+        
+        dec_addition = 0
+        for bit_no in range(0, len(binary), size):
+            dec_addition += int(binary[bit_no:bit_no+size], 2)
+        added_binary = bin(dec_addition)[2:]
+
+        dec_addition = 0
+        while len(added_binary) > size:
+            for bit_no in range(len(added_binary), 0, -size):
+                if bit_no < size:
+                    dec_addition += int(added_binary[:bit_no], 2)
+                else:
+                    dec_addition += int(added_binary[bit_no-size:bit_no], 2)
+            added_binary = bin(dec_addition)[2:].zfill(size)
+            
+        complemented_binary = bin(~dec_addition + (1 << size))[2:].zfill(size)
+        return hex(int(complemented_binary, 2))[2:].zfill(4)
+
+    def verification(self, request_binary, decrypted_request):
 
         # Reject/Ignore the request if any of these are False
         
@@ -409,7 +466,19 @@ class Transport_Layer():
             return False
 
 
-        # TODO: check sum in here somwhere
+        # ignore request if calculated checksum does not match with the checksum from the client's request
+
+        tcp_pseudo_header = Pseudo_Header(SERVER_IP, CLIENT_IP, TCP_PROTOCOL, decrypted_request.length)
+        
+        calculated_checksum = self.calculate_checksum(tcp_pseudo_header.binary(), request_binary)
+
+        print(calculated_checksum)
+        
+        del tcp_pseudo_header
+
+        if calculated_checksum != decrypted_request.checksum:
+            return False
+
 
         return True
 
@@ -456,13 +525,23 @@ class TCP_Segment():
             self.data_raw = ''
 
         self.data_length = len(self.data_raw)
-    
         self.header_length = bin((len(self.source_port + self.dest_port + self.seq_num + self.ack_num + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options) + 4) // 32)[2:].zfill(4)  # 4 bits for the header length itself    
+        
         header = self.source_port + self.dest_port + self.seq_num + self.ack_num + self.header_length + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options
         self.segment = header + self.data_raw
+        
+        # Length in bytes
+        self.length = int(len(self.segment) / 8)
 
+    def update_encryption(self):
+
+        header = self.source_port + self.dest_port + self.seq_num + self.ack_num + self.header_length + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options
+        self.segment = header + self.data_raw
+        
 
     def decrypt(self, segment):
+        # Length in bytes
+        self.length = int(len(segment) / 8)
         # Source port
         self.source_port = int(segment[0:16], 2)
         # Destination port
@@ -472,9 +551,9 @@ class TCP_Segment():
         # Acknowledgement number
         self.ack_num = int(segment[64:96], 2)
         # Header length
-        self.header_length = int(segment[96:100], 2) # 32 bit multiples / 4 bytes NOTE: Recorded as Hex
+        self.header_length = int(segment[96:100], 2) # 32 bit multiples / 4 bytes 
         # Reserved / Unused
-        self.reserved = int(segment[100:106], 2) # unused, TODO: should probably check for this to be 0, would be incorrect otherwise?
+        self.reserved = int(segment[100:106], 2) # unused
         # Flags
         self.URG = int(segment[106:107], 2)
         self.ACK = int(segment[107:108], 2)
@@ -485,7 +564,7 @@ class TCP_Segment():
         # Window size
         self.window_size = int(segment[112:128], 2)
         # Checksum
-        self.checksum = int(segment[128:144], 2) # TODO: Pretty sure this is in hexadecimal, need to look into this
+        self.checksum = hex(int(segment[128:144], 2))[2:].zfill(4)
         # Urgent pointer
         if self.URG: 
             self.urgent_pointer = int(segment[144:160], 2)
@@ -498,6 +577,25 @@ class TCP_Segment():
         self.data_raw = segment[header_end:]
         self.data_length = len(self.data_raw)
 
+
+class Pseudo_Header():
+    def __init__(self, source_ip, destination_ip, protocol, length):
+        
+        self.source_ip = source_ip
+        self.destination_ip = destination_ip
+        self.reserved = 0
+        self.protocol = protocol
+        self.length = length
+    
+    def binary(self):
+
+        source_ip_binary = ip_to_binary(self.source_ip).zfill(32)
+        destination_ip_binary = ip_to_binary(self.destination_ip).zfill(32)
+        reserved_binary =  bin(self.reserved)[2:].zfill(8)
+        protocol_binary = bin(self.protocol)[2:].zfill(8)
+        length_binary = bin(self.length)[2:].zfill(16)
+
+        return (source_ip_binary + destination_ip_binary + reserved_binary + protocol_binary + length_binary)
 
 
 
