@@ -27,10 +27,6 @@ TCP_PROTOCOL = 6
 #-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#
 # Helper Methods
 
-
-
-
-
 def ip_to_binary(ip):
     binary = ''
     for part in ip.split('.'):
@@ -38,8 +34,19 @@ def ip_to_binary(ip):
 
     return binary
 
+# Max byte for a utf8 character = 4 bytes = 32 bits
+def to_32bit(char):
+    return char[2:].zfill(32)
 
+def to_text(binary):
+    return chr(binary)
+    
+def encode_to_binary(text):
+    text = '' if text is None else text
+    return ''.join(map(to_32bit, map(bin, bytearray(text, 'utf8'))))
 
+def decode_to_text(binary):
+    return ''.join(map(to_text, [int(binary[i:i+32], 2) for i in range(0, len(binary), 32)]))
 
 
 #-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#
@@ -55,14 +62,22 @@ class Application_Layer():
         self.http_send_pipe = client_pipe
         self.http_recieve_pipe = server_pipe
 
-    def receive_request(self, request_pipe):
-        request = None
+    def setup_log_file(self):
+        with open("server_http_log.txt", "w") as log:
+            log.write('HTTP Server Responses:\n\n')
+
+    def write_to_log(self, data):
+        with open("server_http_log.txt", "a") as log:
+            log.write(data)
+
+    def receive_request(self, request_pipe, transport_layer):
+        http_request = None
 
         # While the server connection is stable read any incoming requests from the named pipe
-        while not request:
-            request = request_pipe.read()
-        
-        return request
+        while not http_request:
+            # Use the transport layer to recieve the incoming requests
+            http_request = transport_layer.recieve_and_translate_request(request_pipe)
+        return http_request
 
     def process_request(self, http_request):
         # Check what the request is
@@ -82,17 +97,15 @@ class Application_Layer():
             http_response = self.do_HEAD()
         else:
             http_response = self.do_INVALID()
-
         return http_response
 
-    def send_response(self, http_response):
-        # Send the response back to the client through the named pipe
-        with open (self.http_send_pipe, 'w') as response_pipe:
-            response_pipe.write(http_response)   
+    def send_response(self, http_response, request_pipe, transport_layer):
 
-        with open("server_http_log.txt", "a") as log:
-            log.write(http_response)
+        self.write_to_log(http_response)
 
+        # Pass this to the transport layer to convert this response into a TCP packet
+        # Send the response back to the client through the transport layer
+        transport_layer.translate_and_send_response(http_response, request_pipe)  
 
 
 
@@ -122,9 +135,9 @@ class Application_Layer():
 
     def generate_response(self, status_code='', headers='' , response_body=''):
         response = ""
-        response += f"HTTP/1.1 {status_code}" + "\r\n"
-        response += f"{headers}"        + "\r\n" + "\r\n"
-        response += f"{response_body}"            + "\r\n" if response_body else ''
+        response += f"HTTP/1.1 {status_code}" + "\n"
+        response += f"{headers}"        + "\n" + "\n"
+        response += f"{response_body}"            + "\n" if response_body else ''
 
         return response 
 
@@ -138,10 +151,10 @@ class Application_Layer():
         date = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
         headers=''
         if invalid:
-            headers += f'Content-Type: text/plain\r\n'
-            headers += f'Content-Length: {len(body)}\r\n'
+            headers += f'Content-Type: text/plain\n'
+            headers += f'Content-Length: {len(body)}\n'
         else:
-            headers += f'Location: http://example.com/redirect\r\n'
+            headers += f'Location: http://example.com/redirect\n'
             # TODO: This needs to be a bit less generalised maybe? so different for different 3xx codes?
         headers += f"Date: {date}"
 
@@ -172,13 +185,31 @@ class Transport_Layer():
         self.window_size = 65535 # Set to maximum size in Bytes 
         self.tcp_port = 80 # Default TCP server port
 
-    def receive_request(self, connection_request_pipe):
+    def setup_log_file(self):
+        segment_fields = ['Source Port', 'Destination Port', 'Sequence Number', 'Acknowledgement Number', 'Data Offset', 'Reserved', 'URG', 'ACK', 'PSH', 'RST', 'SYN', 'FIN', 'Window', 'Checksum', 'Urgent Pointer', 'Options', 'Data']
+        format = ' | '.join(segment_fields)
+        with open("server_tcp_log.txt", "w") as log:
+            log.write('TCP Packet Format:\n')
+            log.write(format+'\n\n')
+            log.write('TCP Server Responses:\n\n')
+
+    def write_to_log(self, data):
+        readable_data = TCP_Segment()
+        readable_data.decrypt(data)
+        segment_fields = [ str(field) for field in readable_data.segment ]
+        output = ' | '.join(segment_fields)
+        raw_output = output.replace("\n", "\\n")
+
+        with open("server_tcp_log.txt", "a") as log:
+            log.write(raw_output+'\n\n')
+
+    def receive_request(self, request_pipe):
         
         tcp_request = None
 
         # While the server connection is stable read any incoming requests from the named pipe
         while not tcp_request:
-            tcp_request = connection_request_pipe.read()
+            tcp_request = request_pipe.read()
         
         return tcp_request.rstrip()
 
@@ -193,7 +224,7 @@ class Transport_Layer():
 
         return request
     
-    def create_response(self, SYN=False, ACK=False, PSH=False, FIN=False, URG=False, RST=False, urgent_pointer=False ,options=None, data=None):
+    def create_response(self, SYN=0, ACK=0, PSH=0, FIN=0, URG=0, RST=0, urgent_pointer=0 ,options=None, data=None):
 
         tcp_response = TCP_Segment()
         tcp_response.encrypt( source_port    = self.tcp_port, 
@@ -221,9 +252,56 @@ class Transport_Layer():
         
     def send_response(self, tcp_response):
         
+        self.write_to_log(tcp_response.segment) 
+
         with open (self.tcp_send_pipe, 'w') as response_pipe:
             response_pipe.write(tcp_response)
 
+
+
+    def recieve_and_translate_request(self, request_pipe):
+        
+        request = self.receive_request(request_pipe)
+
+        # decrypt the request from binary into readable values
+        decrypted_request = self.process_request(request)
+        
+        # ignore request if it does not pass verification requirements
+        if self.verification(request, decrypted_request) is False:
+            return None
+        
+        # acknowledge bytes from TCP packet with data
+        # increment acknowledment_number for server by the bytes of data
+        self.update_ack_counter(decrypted_request.data_length)
+
+        # Send ACK to acknowledge recieving this TCP packet
+        response = self.create_response(ACK=True)
+        #self.send_response(response.segment)
+
+        # if decrypted_request.FIN:
+        #     self.terminate_connection(passive)
+        #     return None
+        # could possibly talk about doing fin and psh to simultaneously start a terminate alongside giving data.         
+
+        # TODO: figure out what flags are required
+        # I think none are, unless we are doing MTU in which case PSH might be something to talk about to avoid possible fragmentation
+    
+        # process the data from the request to be readable by the application layer
+        data = decrypted_request.data 
+        return data
+
+    def translate_and_send_response(self, data, request_pipe):
+
+        # Translate data into a TCP packet format and send this response
+        response = self.create_response(data=data)    
+        #self.send_response(response.segment)
+        
+        # increment sequence_number for server by the bytes of data
+        self.update_seq_counter(response.data_length)
+
+        # check whether client has acknowledged the data sent
+        # self.check_ack_recieved(request_pipe)
+        # TODO: Undo this comment, only did so for testing purposes.              
 
 
 
@@ -415,6 +493,26 @@ class Transport_Layer():
     def update_ack_counter(self, payload_bytes):
         self.ack_counter += payload_bytes
 
+    def check_ack_recieved(self, request_pipe):
+        ack_recieved = False
+        while not ack_recieved:
+            # check whether client has acknowledged the data sent
+            ack_request = self.receive_request(request_pipe)
+            decrypted_ack_request = self.process_request(ack_request)
+            # ignore request if it does not pass verification requirements
+            if self.verification(ack_request, decrypted_ack_request) is False:
+                continue
+
+            # TODO: Should probably have a FIN check here? make this into a method
+
+            # expecting an ACK flag
+            # ignore request if *ONLY* ACK flag is not present
+            if decrypted_ack_request.ACK and not( decrypted_ack_request.SYN or decrypted_ack_request.PSH or decrypted_ack_request.RST or decrypted_ack_request.URG or decrypted_ack_request.FIN):
+                # ACK has been recieved
+                ack_recieved = True
+                # continue onto next request
+
+
     def update_checksum(self, tcp_response):
 
         tcp_pseudo_header = Pseudo_Header(SERVER_IP, CLIENT_IP, TCP_PROTOCOL, tcp_response.length)
@@ -527,16 +625,14 @@ class TCP_Segment():
             self.options.zfill(ceil(len(self.options) / 32) * 32)
         else:
             self.options = ''
-        if data is not None:
-            self.data_raw = bin(data)[2:]
-        else:
-            self.data_raw = ''
-
-        self.data_length = len(self.data_raw)
-        self.header_length = bin((len(self.source_port + self.dest_port + self.seq_num + self.ack_num + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options) + 4) // 32)[2:].zfill(4)  # 4 bits for the header length itself    
         
+        self.data = encode_to_binary(data)
+        self.data_length = int(len(self.data) / 8) # length of data in bytes
+
+        self.header_length = bin((len(self.source_port + self.dest_port + self.seq_num + self.ack_num + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options) + 4) // 32)[2:].zfill(4)  # 4 bits for the header length itself    
         header = self.source_port + self.dest_port + self.seq_num + self.ack_num + self.header_length + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options
-        self.segment = header + self.data_raw
+        
+        self.segment = header + self.data
         
         # Length in bytes
         self.length = int(len(self.segment) / 8)
@@ -544,8 +640,7 @@ class TCP_Segment():
     def update_encryption(self):
 
         header = self.source_port + self.dest_port + self.seq_num + self.ack_num + self.header_length + self.reserved + self.URG + self.ACK + self.PSH + self.RST + self.SYN + self.FIN + self.window_size + self.checksum + self.urgent_pointer + self.options
-        self.segment = header + self.data_raw
-        
+        self.segment = header + self.data        
 
     def decrypt(self, segment):
         # Length in bytes
@@ -577,13 +672,17 @@ class TCP_Segment():
         if self.URG: 
             self.urgent_pointer = int(segment[144:160], 2)
         else:
-            self.urgent_pointer = False
+            self.urgent_pointer = 0
         # Options / Padding
         header_end = self.header_length * 32 # Header length is measured in 32-bit multiples
         self.options = segment[160:header_end] # TODO: decide whether im doing?
         # Payload / Data
         self.data_raw = segment[header_end:]
-        self.data_length = len(self.data_raw)
+        self.data_length = int(len(self.data_raw) / 8)
+        self.data = decode_to_text(self.data_raw)
+
+        self.segment = [self.source_port, self.dest_port, self.seq_num, self.ack_num, self.header_length, self.reserved, self.URG, self.ACK, self.PSH, self.RST, self.SYN, self.FIN, self.window_size, self.checksum, self.urgent_pointer, self.options, self.data]
+        
 
 
 class Pseudo_Header():
@@ -625,6 +724,10 @@ class Server():
 
     
     # Primary Methods:
+        
+    def setup_log_files(self):
+        self.http.setup_log_file()
+        self.tcp.setup_log_file()
 
 
     def open_connection(self):
@@ -635,22 +738,16 @@ class Server():
         
         print("Server is running...")
 
-        # Establish connection using handshake
-        self.tcp.establish_handshake()
+        while not self.connection_active():
+            # Establish connection using handshake
+            self.tcp.establish_handshake()
 
-        if self.tcp.TCB.state == 'ESTABLISHED':
-            print("Connection successfully established")
-            self.connected = True
-        else:
-            print("Connection failed")
-            self.close_connection()
-
+        print("Connection successfully established")
 
     def close_connection(self):
         
         if self.tcp.TCB.state == 'ESTABLISHED' or self.tcp.TCB.state == "SYN_RCVD":
             self.tcp.terminate_connection()
-            self.connected = False
 
         print("\nClosing the server.")
         # To ensure the pipe is not open, without the server being open ELSE the client is sending requests to nobody.
@@ -660,15 +757,21 @@ class Server():
         # Exit the program
         sys.exit()    
 
+    def connection_active(self):
+        if hasattr(self.tcp, 'TCB'):
+            return (self.tcp.TCB.state == 'ESTABLISHED')
+        else:
+            return False
 
     def run(self):
         with open(self.server_pipe, 'r') as request_pipe:
-            while self.connected:
-
-                request = self.http.receive_request(request_pipe)
+            while self.connection_active():
+                request = self.http.receive_request(request_pipe, self.tcp)
                 request_type = self.http.process_request(request)
                 response = self.http.create_response(request_type)
-                self.http.send_response(response)
+                self.http.send_response(response, request_pipe, self.tcp)
+
+        self.close_connection()
 
 
 
@@ -683,6 +786,7 @@ class Server():
 server = Server(CLIENT_PIPE, SERVER_PIPE)
 
 try:
+    server.setup_log_files()
     server.open_connection()
     server.run()
 except KeyboardInterrupt:
